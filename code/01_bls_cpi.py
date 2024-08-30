@@ -50,9 +50,6 @@ cpi_df['date'] = pd.to_datetime(
 )
 # and drop the unnecessary variables -- i no longer need year nor month, since i have a date variable containing information from both variables
 cpi_df = cpi_df.drop(['year', 'month'], axis=1)
-# now let's check the dataframe
-print(cpi_df)
-print(cpi_df.columns)
 # finally let's save as a csv
 cpi_df.to_csv(
     f'{data}/cpi.csv', index=False
