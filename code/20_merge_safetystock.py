@@ -34,9 +34,7 @@ master_df['year'] = master_df['date'].dt.year
 for var in master_df.columns.drop(['date', 'day', 'month', 'year']).tolist():
     master_df[var] = master_df.groupby(['year', 'month'])[var].transform(lambda x: x.mean(skipna=True))
 master_df = master_df[master_df['day'] == 1]
-master_df.to_csv(f'{data}/test.csv', index=False)
 master_df = pd.merge(master_df, cpi_df, on='date', how='outer')
-master_df.to_csv(f'{data}/test2.csv', index=False)
 cpi_anchor = pd.to_datetime('2023-03-01')
 fixed_cpi = master_df.loc[master_df['date'] == cpi_anchor, 'all-urban cpi'].values
 master_df['price deflator'] = master_df['all-urban cpi'] / fixed_cpi
