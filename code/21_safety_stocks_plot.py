@@ -34,4 +34,3 @@ master_df['houston - linden-buckeye tariff (real)'] = (master_df['houston - lind
 tariff_rates = ['houston - linden-buckeye tariff (nominal)', 'houston - linden-buckeye tariff (real)']
 plot_time_series(master_df, tariff_rates, 'Houston, TX - Linden, NJ Tariff Rates', '$/Gal',
                  'colonial_linden_rates.png')
-

@@ -19,7 +19,7 @@ header = {
     'facets': {
         'duoarea': [
             'R1X', 'SCT', 'SMA',
-            'SME', 'SNH', 'SRI'
+            'SME', 'SNH', 'SRI', 'SVT'
         ],
         'product': [
             'EPD2'
@@ -87,6 +87,7 @@ area_mapping = {
     'R1X': 'padd1a',
     'SRI': 'ri.',
     'SNH': 'nh.',
+    'SVT': 'vt.',
 }
 eia_refiner_diesel_prices_df['area'] = (eia_refiner_diesel_prices_df['area']
                                .replace(area_mapping))
