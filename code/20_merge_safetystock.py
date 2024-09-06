@@ -2,6 +2,8 @@ import pandas as pd
 from pathlib import Path
 import xlsxwriter
 import matplotlib.pyplot as plt
+from docx import Document
+from docx.shared import Inches
 # let's create a set of locals referring to our directory and working directory 
 home_dir = Path.home()
 work_dir = (home_dir / 'safety_stocks')
@@ -36,25 +38,30 @@ def cpi_merge(df, cpi_df):
     return df 
 
 def process_data(original_df, name_prefix, cpi_df):
+    # Convert date columns to datetime
     original_df['date'] = pd.to_datetime(original_df['date'])
-    original_df['day'] = original_df['date'].dt.day
-    original_df['month'] = original_df['date'].dt.month
-    original_df['year'] = original_df['date'].dt.year
+    original_df['month_year'] = original_df['date'].dt.to_period('M')  # Create month-year column
     
-    for var in original_df.columns.drop(['date', 'day', 'month', 'year']).tolist():
-        original_df[var] = (original_df.groupby(['year', 'month'])[var]
-                            .transform(lambda x: x.mean(skipna=True)))
-    original_df = original_df[original_df['day'] == 1]
-    original_df = original_df.drop(['day', 'month', 'year'], axis=1)
-    original_df = original_df.sort_values(by='date')
+    # Collapse on month-year and calculate the mean for each group
+    original_df = original_df.groupby('month_year').mean().reset_index()
     
+    # Restore the 'date' column as the first of the month (since it was grouped by month-year)
+    original_df['date'] = original_df['month_year'].dt.to_timestamp()
+    original_df = original_df.drop('month_year', axis=1)
+
+    # Apply CPI merge
     detailed_df = cpi_merge(original_df, cpi_df)
     
+    # Forward fill the tariff columns directly in detailed_df
     cols_ffill = [col for col in detailed_df.columns if 'tariff' in col]
-    for var in cols_ffill:
-        detailed_df[var] = original_df[var].ffill()
+    
+    if cols_ffill:
+        # Forward-fill only the tariff columns in detailed_df
+        detailed_df[cols_ffill] = detailed_df[cols_ffill].ffill()
+    
     detailed_df_name = f'{name_prefix}_detailed_df'
-
+    
+    # Copy detailed_df back into original_df and drop CPI-related columns
     original_df = detailed_df.copy()
     original_df.drop(['price deflator', 'all-urban cpi'], axis=1, inplace=True)
 
@@ -65,35 +72,42 @@ def calculate_real_prices(df, nominal_cols):
         raise KeyError("'price deflator' column is missing. Ensure CPI merge was successful.")
     for col in nominal_cols:
         real_col = col.replace(' (nominal)', ' (real)')
-        df[real_col] = df[col].fillna(0) / df['price deflator'].fillna(1)
+        df[real_col] = df[col] / df['price deflator']
     return df
 
 def save_to_excel(df_dict, file_name):
     with pd.ExcelWriter(file_name, engine='xlsxwriter') as writer:
         for df_name, df in df_dict.items():
-            df.to_excel(writer, sheet_name=df_name, index=False)
+            sheet_name = df_name.replace('_detailed_df', '')[:31]
+            df.to_excel(writer, sheet_name=sheet_name, index=False)
 
 def process_master_data(dfs, cpi_df):
     master_df = pd.DataFrame()
+    detailed_dfs = {}  # Dictionary to hold detailed DataFrames
+
     for df_name, df in dfs.items():
         processed_df, detailed_df, detailed_df_name = process_data(df, df_name, cpi_df)
-        #print(processed_df.columns)
         nominal_cols = [col for col in processed_df.columns if 'nominal' in col]
-        detailed_df = calculate_real_prices(detailed_df, nominal_cols)
+        
+        detailed_df = calculate_real_prices(detailed_df, nominal_cols) if nominal_cols else detailed_df
+        
+        detailed_dfs[detailed_df_name] = detailed_df  # Store detailed_df in the dictionary
+
         if master_df.empty:
             master_df = processed_df.copy()
         else:
             master_df = pd.merge(master_df, processed_df, on='date', how='outer')
-    return master_df
+
+    return master_df, detailed_dfs
 
 def main():
     dfs = load_data()
     cpi_df = dfs.pop('cpi')  # Remove CPI as it will be merged separately
     cpi_df['date'] = pd.to_datetime(cpi_df['date'])
-    master_df = process_master_data(dfs, cpi_df)
+    master_df, detailed_dfs = process_master_data(dfs, cpi_df)
     master_df = cpi_merge(master_df, cpi_df)
 
-    save_to_excel(dfs, f'{data}/safety_stocks_master_detailed.xlsx')
+    save_to_excel(detailed_dfs, f'{data}/safety_stocks_master_detailed.xlsx')
     
     master_df['usgc/ny average low sulfur no. 2 spot (nominal)'] = (
         master_df['ny harbor-no. 2 diesel low sulfur spot price (nominal)'] 
@@ -110,8 +124,15 @@ def main():
                                     'price deflator']]
     
     master_filtered_df.to_csv(f'{data}/safety_stocks_master.csv', index=False)
+    return master_filtered_df, detailed_dfs
 
-main()
+master_filtered_df, detailed_dfs = main()
+
+def insert_graph_to_word(doc, image_path, plot_title):
+    # Add title and image to the document
+    doc.add_heading(plot_title, level=1)
+    doc.add_paragraph(f"Graph: {plot_title}")
+    doc.add_picture(image_path, width=Inches(5))
 
 # define a plotting function
 def plot_time_series(df, vars, title, ylabel, save_path):
@@ -133,87 +154,87 @@ def plot_time_series(df, vars, title, ylabel, save_path):
     plt.grid(True)
     plt.tight_layout()
     plt.savefig(f'{output}/{save_path}.png')
-    plt.show()
+    #plt.show()
+    plt.close()
+    insert_graph_to_word(doc, f'{output}/{save_path}.png', title)
 
-df_names = [master_filtered_df, bbg_rack_retail_detailed_df, colonial_tariff_detailed_df, 
-            eia_refiner_diesel_detailed_df, eia_refiner_gasoline_detailed_df, 
-            eia_retail_detailed_df, eia_spot_detailed_df,
-            eia_stock_df, eia_supplier_sales_detailed_df]
-sheet_names = ['master filtered', 'rack_retail prices, bbg', 'colonial pipeline rates',
+doc = Document()
+doc.add_heading('Data Inventory Time-Series', 0)
+
+sheet_names = ['rack_retail prices, bbg', 'colonial pipeline rates',
                'refiner diesel prices, eia', 'refiner gasoline prices, eia',
                'retail prices, eia', 'spot prices, eia',
-               'stock, eia', 'supplier sales, eia']
-graph_titles = ['Master Filtered', 'Rack Retail Prices, BBG', 'Colonial Pipeline Tariff Rates',
+               'weekly stock, eia', 'monthly stock, eia',
+               'supplier sales, eia']
+graph_titles = ['Prices, BBG', 'Colonial Pipeline Tariff Rates',
                 'Refiner Diesel Prices, EIA', 'Refiner Gasoline Prices, EIA',
                 'Retail Prices, EIA', 'Spot Prices, EIA',
-                'Stock, EIA', 'Supplier Sales, EIA']
-graph_save_paths = ['master_filtered', 'rack_retail_prices_bbg', 'colonial_pipeline_tariff_rates',
+                'Weekly Ending Stock, EIA', 'Monthly Ending Stock, EIA', 
+                'Supplier Sales, EIA']
+graph_save_paths = ['rack_retail_prices_bbg', 'colonial_pipeline_tariff_rates',
                     'refiner_diesel_prices_eia', 'refiner_gasoline_prices_eia',
                     'retail_prices_eia', 'spot_prices_eia',
-                    'stock_eia', 'supplier_sales_eia']
+                    'weekly_stock_eia', 'stock_eia', 'supplier_sales_eia']
 
 # now plot!
-for df_plot, df_title, plot_title, plot_savepath in zip(
-    df_names, sheet_names, graph_titles, graph_save_paths):
-    if id(df_plot) in [id(colonial_tariff_detailed_df), id(eia_spot_detailed_df), 
-                       id(bbg_rack_retail_detailed_df), id(eia_refiner_diesel_detailed_df), 
-                       id(eia_refiner_gasoline_detailed_df), id(eia_retail_detailed_df)]:
+for df_name, df_plot, df_title, plot_title, plot_savepath in zip(
+    detailed_dfs.keys(), detailed_dfs.values(), sheet_names, graph_titles, graph_save_paths):
+    '''print(df_name) 
+    print(df_plot.columns)'''
+    # Replace these with string comparisons to match the keys in detailed_dfs
+    if df_name in ['colonial_tariff_detailed_df', 'eia_spot_detailed_df', 
+                   'bbg_rack_retail_detailed_df', 'eia_refiner_diesel_detailed_df', 
+                   'eia_refiner_gasoline_detailed_df', 'eia_retail_detailed_df']:
+        # Find the nominal columns for real price calculation
         vars_plot = [col.replace(' (nominal)', '') for col in df_plot.columns if 'nominal' in col]
         for var in vars_plot:
             nominal_var = f'{var} (nominal)'
-            # Ensure nominal_var exists and handle missing values carefully
             if nominal_var in df_plot.columns:
                 df_plot[f'{var} (real)'] = (df_plot[nominal_var].dropna() 
                                           / df_plot['price deflator'].dropna())
         vars_plot_real = [var for var in df_plot.columns if '(real)' in var]
-        #print(vars_plot_real)
         if vars_plot_real:
-            if id(df_plot) in [id(colonial_tariff_detailed_df), id(eia_spot_detailed_df)]:
+            if df_name in ['colonial_tariff_detailed_df', 'eia_spot_detailed_df']:
                 plot_time_series(df_plot, vars_plot_real, plot_title, 
-                             '$/Gal', plot_savepath)
-            if id(df_plot) == id(bbg_rack_retail_detailed_df):
-                dyed_columns = [col for col in vars_plot_real 
-                                if 'heating oil dyed' in col]
+                                 '$/Gal', plot_savepath)
+            if df_name == 'bbg_rack_retail_detailed_df':
+                dyed_columns = [col for col in vars_plot_real if 'heating oil dyed' in col]
                 if dyed_columns:
-                    plot_time_series(df_plot, dyed_columns, f'Heating Oil, Dyed {plot_title}',
-                                 '$/Gal', f'heating_dyed_{plot_savepath}')
+                    plot_time_series(df_plot, dyed_columns, f'Heating Oil, Dyed Rack {plot_title}',
+                                     '$/Gal', f'heating_dyed_{plot_savepath}')
                 residential_columns = [col for col in vars_plot_real
                                        if 'heating oil residential price' in col]
                 if residential_columns:
                     plot_time_series(df_plot, residential_columns, 
-                                 f'Residential Heating Oil {plot_title}', 
-                                 '$/Gal', f'heating_resident_{plot_savepath}')
-            if id(df_plot) == id(eia_refiner_diesel_detailed_df):
-                retail_columns = [col for col in vars_plot_real 
-                                if 'retail' in col]
+                                     f'Residential Heating Oil Retail {plot_title}', 
+                                     '$/Gal', f'heating_resident_{plot_savepath}')
+            if df_name == 'eia_refiner_diesel_detailed_df':
+                retail_columns = [col for col in vars_plot_real if 'retail' in col]
                 if retail_columns:
                     plot_time_series(df_plot, retail_columns, f'Retail {plot_title}',
-                                 '$/Gal', f'retail_{plot_savepath}')
-                wholesale_resale_columns = [col for col in vars_plot_real
-                                       if 'wholesale/resale' in col]
+                                     '$/Gal', f'retail_{plot_savepath}')
+                wholesale_resale_columns = [col for col in vars_plot_real if 'wholesale/resale' in col]
                 if wholesale_resale_columns:
                     plot_time_series(df_plot, wholesale_resale_columns, 
-                                 f'Wholesale/Resale {plot_title}', '$/Gal', 
-                                 f'wholesale_resale_{plot_savepath}')
-            if id(df_plot) == id(eia_refiner_gasoline_detailed_df):
+                                     f'Wholesale/Resale {plot_title}', '$/Gal', 
+                                     f'wholesale_resale_{plot_savepath}')
+            if df_name == 'eia_refiner_gasoline_detailed_df':
                 company_outlets_columns = [col for col in vars_plot_real 
-                                if 'company outlets' in col and 'total' in col]
+                                           if 'company outlets' in col and 'total' in col]
                 if company_outlets_columns:
                     plot_time_series(df_plot, company_outlets_columns, 
                                      f'Through Company Outlets {plot_title}', 
                                      '$/Gal', f'company_outlets_{plot_savepath}')
-                other_users = [col for col in vars_plot_real
-                                       if 'other users' in col and 'total' in col]
+                other_users = [col for col in vars_plot_real if 'other users' in col and 'total' in col]
                 if other_users:
                     plot_time_series(df_plot, other_users, f'Other Users {plot_title}', 
                                      '$/Gal', f'other_users_{plot_savepath}')
-                wholesale_resale_columns = [col for col in vars_plot_real
-                                       if 'wholesale/resale' in col and 'total' in col]
+                wholesale_resale_columns = [col for col in vars_plot_real if 'wholesale/resale' in col]
                 if wholesale_resale_columns:
                     plot_time_series(df_plot, wholesale_resale_columns, 
-                                 f'Wholesale/Resale {plot_title}', 
-                                 '$/Gal', f'wholesale_resale_{plot_savepath}')
-    if id(df_plot) == id(eia_stock_df):
+                                     f'Wholesale/Resale {plot_title}', 
+                                     '$/Gal', f'wholesale_resale_{plot_savepath}')
+    if df_name == 'eia_monthly_stock_detailed_df':
         vars_plot = [col for col in df_plot.columns if 'stock' in col]
         distillate_column = [col for col in vars_plot if 'distillate' in col]
         if distillate_column:
@@ -229,7 +250,10 @@ for df_plot, df_title, plot_title, plot_savepath in zip(
             plot_time_series(df_plot, reformulated_mg_column, 
                          f'Reformulated Motor Gasoline {plot_title}', 'Barrels', 
                          f'rfmg_{plot_savepath}')
-    if id(df_plot) == id(eia_supplier_sales_detailed_df):
+    if df_name == 'eia_weekly_stock_detailed_df': 
+        vars_plot = [col for col in df_plot.columns if 'stock' in col]
+        plot_time_series(df_plot, vars_plot, plot_title, 'Barrels', plot_savepath)
+    if df_name == 'eia_supplier_sales_detailed_df':
         vars_plot = [col for col in df_plot.columns if 'sales' in col]
         distillate_column = [col for col in vars_plot if 'distillate' in col]
         if distillate_column:
@@ -250,3 +274,5 @@ for df_plot, df_title, plot_title, plot_savepath in zip(
             plot_time_series(df_plot, diesel_low_sulfur_column, 
                          f'Diesel Low Sulfur {plot_title}', 'Barrels', 
                          f'diesel_lowsulfur_{plot_savepath}')
+doc.save(f'{output}/data_inventory_compiled_timeseries.docx')
+print("Document saved as 'data_inventory_compiled_timeseries.docx'")
