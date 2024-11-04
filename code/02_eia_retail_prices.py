@@ -35,6 +35,8 @@ while True:
     # Check if the request was successful
     if eia_retail_prices.status_code == 200:
         eia_retail_prices_data = eia_retail_prices.json()
+        #with open('test.json', 'w') as json_file:
+            #json.dump(eia_retail_prices_data, json_file, indent=4)
         eia_retail_prices_series = eia_retail_prices_data['response']['data']
         # Check if there's no more data
         if not eia_retail_prices_series:
